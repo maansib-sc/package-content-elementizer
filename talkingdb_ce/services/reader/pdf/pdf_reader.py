@@ -1,6 +1,7 @@
 import io
 import os
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,12 @@ from ..killable_subprocess import run_killable
 
 CONVERT_TIMEOUT_SECONDS = int(
     os.getenv("CE_PDF_CONVERT_TIMEOUT_SECONDS", "3600"))
+
+_CONVERT_MAX_MEMORY_MB = int(
+    os.getenv("CE_PDF_CONVERT_MAX_MEMORY_MB", "0"))
+CONVERT_MAX_MEMORY_BYTES = (
+    _CONVERT_MAX_MEMORY_MB * 1024 * 1024 if _CONVERT_MAX_MEMORY_MB > 0 else None
+)
 
 MIN_EXTRACTABLE_TEXT_CHARS = int(os.getenv("CE_PDF_MIN_TEXT_CHARS", "16"))
 
@@ -52,11 +59,16 @@ class PdfReader:
         io_buffer,
         file_name,
         cancel_check: Optional[Callable[[], bool]] = None,
+        checkpoint_dir: Optional[str] = None,
     ) -> DocumentModel:
+        """Read a PDF by first converting it to DOCX. Optionally provide a persistent
+          checkpoint directory to resume failed conversions across retries; otherwise,
+          a temporary directory is created and cleaned up automatically.
+        """
         self._reject_if_password_protected(io_buffer, file_name)
 
         docx_bytes, page_numbers = self._to_docx_bytes(
-            io_buffer, cancel_check=cancel_check
+            io_buffer, cancel_check=cancel_check, checkpoint_dir=checkpoint_dir
         )
 
         model = self.docx_reader.read_document(
@@ -96,6 +108,7 @@ class PdfReader:
         self,
         io_buffer,
         cancel_check: Optional[Callable[[], bool]] = None,
+        checkpoint_dir: Optional[str] = None,
     ) -> Tuple[bytes, List[int]]:
         io_buffer.seek(0)
         pdf_data = io_buffer.read()
@@ -103,6 +116,9 @@ class PdfReader:
         pdf_path: Optional[str] = None
         docx_path: Optional[str] = None
         pages_path: Optional[str] = None
+        owns_checkpoint_dir = checkpoint_dir is None
+        if owns_checkpoint_dir:
+            checkpoint_dir = tempfile.mkdtemp(prefix="tdb-pdf-ckpt-")
         try:
             with tempfile.NamedTemporaryFile(
                 prefix="tdb-pdf-", suffix=".pdf", delete=False
@@ -121,7 +137,8 @@ class PdfReader:
                 pages_path = tmp_pages.name
 
             page_numbers = self._convert(
-                pdf_path, docx_path, pages_path, cancel_check=cancel_check
+                pdf_path, docx_path, pages_path, checkpoint_dir,
+                cancel_check=cancel_check,
             )
 
             with open(docx_path, "rb") as fh:
@@ -133,15 +150,21 @@ class PdfReader:
                         os.remove(path)
                     except OSError:
                         logger.warning(f"failed to remove temp file: {path}")
+            if owns_checkpoint_dir:
+                shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
     def _convert(
         self,
         pdf_path: str,
         docx_path: str,
         pages_path: str,
+        checkpoint_dir: str,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[int]:
         """Run pdf2docx in a killable child process with a wall-clock cap.
+
+        Process pages in batches and checkpoint each batch. If interrupted,
+        a later attempt resumes from the last completed batch instead of page 0.
 
         Returns the ordered list of 1-based PDF page numbers, one per docx
         section pdf2docx produced (it starts a new section per page).
@@ -149,9 +172,10 @@ class PdfReader:
         try:
             returncode, stdout, stderr = run_killable(
                 [sys.executable, "-m", _CONVERT_MODULE,
-                    pdf_path, docx_path, pages_path],
+                    pdf_path, docx_path, pages_path, checkpoint_dir],
                 timeout_seconds=CONVERT_TIMEOUT_SECONDS,
                 cancel_check=cancel_check,
+                max_memory_bytes=CONVERT_MAX_MEMORY_BYTES,
             )
         except subprocess.TimeoutExpired:
             raise ValueError(

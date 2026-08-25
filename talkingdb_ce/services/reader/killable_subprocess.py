@@ -1,4 +1,5 @@
 import os
+import resource
 import signal
 import subprocess
 import time
@@ -18,26 +19,37 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         pass  # already exited
 
 
+def _limit_address_space(max_memory_bytes: int) -> Callable[[], None]:
+    """Build a ``preexec_fn`` that caps the child's virtual address space."""
+
+    def _preexec() -> None:
+        resource.setrlimit(
+            resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes)
+        )
+
+    return _preexec
+
+
 def run_killable(
     cmd: List[str],
     *,
     timeout_seconds: float,
     cancel_check: Optional[Callable[[], bool]] = None,
     poll_interval: float = _POLL_INTERVAL_SECONDS,
+    max_memory_bytes: Optional[int] = None,
 ) -> Tuple[int, str, str]:
-    """Run ``cmd`` with cancellation and timeout support.
-
-    Returns ``(returncode, stdout, stderr)`` on success. Raises ``ReadCancelled``
-    on cancellation and ``subprocess.TimeoutExpired`` on timeout; the whole
-    process group is killed and reaped in both cases, and in the ``finally``
-    cleanup for any other exception.
-    """
+    """Run ``cmd`` with cancellation and timeout support."""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        preexec_fn=(
+            _limit_address_space(max_memory_bytes)
+            if max_memory_bytes
+            else None
+        ),
     )
     deadline = time.monotonic() + timeout_seconds
 

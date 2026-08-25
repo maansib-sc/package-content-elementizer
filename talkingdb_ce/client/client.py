@@ -39,10 +39,10 @@ class CEClient:
         file: Optional[UploadFile] = None,
         metadata: Optional[Metadata] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        checkpoint_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """``cancel_check`` is supported in DIRECT mode only. API mode cannot
-        cancel an in-flight request to the remote CE service.
-        """
+        """`cancel_check` and `checkpoint_dir` are supported only in DIRECT mode.
+        API mode runs remotely, so local checkpoints and cooperative cancellation are not supported."""
 
         if self.mode == ClientMode.API:
             if file:
@@ -76,6 +76,7 @@ class CEClient:
             document_file=file,
             metadata=metadata.to_str() if metadata else None,
             cancel_check=cancel_check,
+            checkpoint_dir=checkpoint_dir,
         )
 
     # ------------------------------------------------------------- boundary
