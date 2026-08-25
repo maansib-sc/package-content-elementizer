@@ -21,6 +21,7 @@ async def run_parse(
     document_file: UploadFile,
     metadata: Optional[str],
     cancel_check: Optional[Callable[[], bool]] = None,
+    checkpoint_dir: Optional[str] = None,
 ):
     """Parse an uploaded document, supporting HTTP and direct in-process calls
     with cancel_check for the latter.
@@ -59,7 +60,10 @@ async def run_parse(
 
         @track()
         def _parse_document():
-            return parse_document(io_buffer, file_type, file_name, cancel_check=cancel_check)
+            return parse_document(
+                io_buffer, file_type, file_name,
+                cancel_check=cancel_check, checkpoint_dir=checkpoint_dir,
+            )
 
         document = _parse_document()
         file_index = document.build_index()
